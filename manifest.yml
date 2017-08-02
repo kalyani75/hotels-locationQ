@@ -1,0 +1,12 @@
+---
+declared-services:
+  compose-for-redis-service:
+    label: compose-for-redis
+    plan: standard
+applications:
+- name: locationquery
+  memory: 256M
+  instances: 1
+  host: locationquery
+  services:
+  - redis
