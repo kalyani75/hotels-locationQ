@@ -1,7 +1,7 @@
 ---
 declared-services:
-  compose-for-redis-service:
-    label: compose-for-redis
+  redis:
+    label: Compose-for-Redis
     plan: standard
 applications:
 - name: locationquery
