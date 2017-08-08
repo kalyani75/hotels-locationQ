@@ -9,18 +9,19 @@ from flask_cors import cross_origin
 location = Blueprint('location', __name__)
 
 if 'VCAP_SERVICES' in os.environ: 
-	vcap_services = json.loads(os.environ['VCAP_SERVICES'])
+  vcap_services = json.loads(os.environ['VCAP_SERVICES'])
 
-	for key, value in vcap_services.iteritems():   # iter on both keys and values
-		if key.find('redis') > 0:
-		  redis_info = vcap_services[key][0]
+  uri = ''
+  for key, value in vcap_services.iteritems():   # iter on both keys and values
+    if key.find('rdb') > 0:
+      rdb_info = vcap_services[key][0]
 		
-	cred = redis_info['credentials']
-	uri = cred['uri'].encode('utf8')
-  
-	redis = redis.StrictRedis.from_url(uri + '/0')
+      cred = rdb_info['credentials']
+      uri = cred['uri'].encode('utf8')
+      
+  rdb = redis.StrictRedis.from_url(uri + '/0')
 else:
-  redis = redis.StrictRedis(host=os.getenv('REDIS_HOST', 'localhost'), port=os.getenv('REDIS_PORT', 6379), db=0)
+  rdb = redis.StrictRedis(host=os.getenv('REDIS_HOST', 'localhost'), port=os.getenv('REDIS_PORT', 6379), db=0)
     
 @location.errorhandler(400)
 def not_found(error):
@@ -34,12 +35,12 @@ def getlocationfragments(prefix, pagelength):
   prefix = prefix.lower()
   listpart = 50
 
-  start = redis.zrank('locationfragments', prefix)
+  start = rdb.zrank('locationfragments', prefix)
   if start < 0: return []
 
   locationarray = []
   while (len(locationarray) != pagelength):
-    range = redis.zrange('locationfragments', start, start + listpart - 1)
+    range = rdb.zrange('locationfragments', start, start + listpart - 1)
     start += listpart
 
     if not range or len(range) <= 0: 
@@ -61,7 +62,7 @@ def getlocationfragments(prefix, pagelength):
         locationid = entry[indexwithperc + 1:-1]
         locationname = entry[0:indexwithperc] 
         
-        locationproperties = redis.lrange(locationid, 0, -1)
+        locationproperties = rdb.lrange(locationid, 0, -1)
         if len(locationproperties) > 0:
           location['id'] = locationproperties[0]
           location['displayname'] = locationproperties[1]
@@ -89,10 +90,10 @@ def autocomplete(prefix):
 
 def querylocationkeys(query):
   locations = []
-  keys = redis.keys(query)
+  keys = rdb.keys(query)
 
   for key in keys:
-    locationattributes = redis.lrange(key, 0, -1)
+    locationattributes = rdb.lrange(key, 0, -1)
     if len(locationattributes) > 0:
       location = {}
     
@@ -152,20 +153,20 @@ def createlocation():
   locationname = location['acname']
   for l in range(1, len(locationname)):
     locationfragment = locationname[0:l]
-    redis.zadd('locationfragments', 0, locationfragment)
+    rdb.zadd('locationfragments', 0, locationfragment)
   
   locationwithid = locationname + '%L-' + str(location['id']) + '%'
-  redis.zadd('locationfragments', 0, locationwithid)
+  rdb.zadd('locationfragments', 0, locationwithid)
 
   locationkey = 'L-' + str(location['id'])
-  redis.delete(locationkey)
+  rdb.delete(locationkey)
 
-  redis.rpush(locationkey, location['id'])
-  redis.rpush(locationkey, location['displayname'])
-  redis.rpush(locationkey, location['acname'])
-  redis.rpush(locationkey, location['icon'])
-  redis.rpush(locationkey, location['latitude'])
-  redis.rpush(locationkey, location['longitude'])
+  rdb.rpush(locationkey, location['id'])
+  rdb.rpush(locationkey, location['displayname'])
+  rdb.rpush(locationkey, location['acname'])
+  rdb.rpush(locationkey, location['icon'])
+  rdb.rpush(locationkey, location['latitude'])
+  rdb.rpush(locationkey, location['longitude'])
 
   return jsonify({ 'location': location }), 201   
 
@@ -184,12 +185,12 @@ def updatelocation(locationkey):
     'longitude': request.json.get('longitude', 0)
   }
 
-  redis.lset(locationkey, 0, location['id'])
-  redis.lset(locationkey, 1, location['displayname'])
-  redis.lset(locationkey, 2, location['acname'])  
-  redis.lset(locationkey, 3, location['icon'])
-  redis.lset(locationkey, 4, location['latitude'])
-  redis.lset(locationkey, 5, location['longitude'])
+  rdb.lset(locationkey, 0, location['id'])
+  rdb.lset(locationkey, 1, location['displayname'])
+  rdb.lset(locationkey, 2, location['acname'])  
+  rdb.lset(locationkey, 3, location['icon'])
+  rdb.lset(locationkey, 4, location['latitude'])
+  rdb.lset(locationkey, 5, location['longitude'])
   
   return jsonify({ 'locations': makepubliclocation(location) })
 
@@ -202,21 +203,21 @@ def deletelocation(locationkey):
     return jsonify({ 'result': False })
   else:
     locationfullname = locations[0]['acname'] + '%L-' + str(locationkey) + '%'
-    start = redis.zrank('locationfragments', locationfullname)
+    start = rdb.zrank('locationfragments', locationfullname)
     
     previous = start - 1
     locationfragment = locationfullname
 
-    commonfragment = redis.zrange('locationfragments', start + 1, start + 1)
+    commonfragment = rdb.zrange('locationfragments', start + 1, start + 1)
     while (len(locationfragment) > 0):
-      locationfragment = redis.zrange('locationfragments', previous, previous)
+      locationfragment = rdb.zrange('locationfragments', previous, previous)
       
       if (locationfragment[0][-1] == '%' or (len(commonfragment) > 0 and locationfragment[0] == commonfragment[0][0:-1])): 
         break
       else:
         previous = previous - 1
      
-    redis.zremrangebyrank('locationfragments', previous + 1, start)  
-    redis.delete('L-' + str(locationkey))
+    rdb.zremrangebyrank('locationfragments', previous + 1, start)  
+    rdb.delete('L-' + str(locationkey))
     
     return jsonify( { 'result': True } )

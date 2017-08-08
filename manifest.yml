@@ -1,8 +1,4 @@
 ---
-declared-services:
-  redis:
-    label: redis
-    plan: standard
 applications:
 - name: locationquery
   memory: 256M
