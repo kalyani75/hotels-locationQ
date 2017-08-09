@@ -13,7 +13,7 @@ if 'VCAP_SERVICES' in os.environ:
 
   uri = ''
   for key, value in vcap_services.iteritems():   # iter on both keys and values
-    if key.find('rdb') > 0:
+    if key.find('redis') > 0:
       rdb_info = vcap_services[key][0]
 		
       cred = rdb_info['credentials']
