@@ -1,12 +1,17 @@
 import os
-
 import json
+
 import redis
+import requests
 
 from flask import Blueprint, jsonify, request, url_for, make_response, abort
 from flask_cors import cross_origin
 
+from py_zipkin.zipkin import zipkin_span, ZipkinAttrs
 location = Blueprint('location', __name__)
+
+redispool = None
+mqpool = None
 
 if 'VCAP_SERVICES' in os.environ: 
   vcap_services = json.loads(os.environ['VCAP_SERVICES'])
@@ -18,11 +23,16 @@ if 'VCAP_SERVICES' in os.environ:
 		
       cred = rdb_info['credentials']
       uri = cred['uri'].encode('utf8')
-      
-  rdb = redis.StrictRedis.from_url(uri + '/0')
+
+  redispool = redis.ConnectionPool.from_url(uri + '/0')
 else:
-  rdb = redis.StrictRedis(host=os.getenv('REDIS_HOST', 'localhost'), port=os.getenv('REDIS_PORT', 6379), db=0)
-    
+  redispool = redis.ConnectionPool(host=os.getenv('REDIS_HOST', 'localhost'), port=os.getenv('REDIS_PORT', 6379), db=0)
+
+PORT = int(os.getenv('PORT', '9011'))
+ZIPKINHOST = os.getenv('ZIPKINHOST', 'zipkin')
+ZIPKINPORT = int(os.getenv('ZIPKINPORT', 9411))
+ZIPKINSAMPLERATE = float(os.getenv('ZIPKINSAMPLERATE', 100.0))
+
 @location.errorhandler(400)
 def not_found(error):
   return make_response(jsonify( { 'error': 'Bad request' }), 400)
@@ -31,7 +41,14 @@ def not_found(error):
 def not_found(error):
   return make_response(jsonify( { 'error': 'Not found' }), 404)
 
+def http_transport(encoded_span):
+  # The collector expects a thrift-encoded list of spans.
+  requests.post('http://' + ZIPKINHOST + ':' + str(ZIPKINPORT) + '/api/v1/spans', data=encoded_span, headers={'Content-Type': 'application/x-thrift'})  
+
+@zipkin_span(service_name='hotels.com:locationquery', span_name='locationquery:getlocationfragments')
 def getlocationfragments(prefix, pagelength):
+  rdb = redis.StrictRedis(connection_pool=redispool)
+
   prefix = prefix.lower()
   listpart = 50
 
@@ -78,17 +95,24 @@ def getlocationfragments(prefix, pagelength):
 @location.route('/api/v1.0/locations/autocomplete/<prefix>', methods=['GET'])
 @cross_origin()
 def autocomplete(prefix):
-  if request.args.get('pagelength') is None: pagelength = 20
-  else: pagelength = int(request.args.get('pagelength'))
+  with zipkin_span(service_name='hotels.com:locationquery', zipkin_attrs=ZipkinAttrs(trace_id=request.headers['X-B3-TraceID'],
+    span_id=request.headers['X-B3-SpanID'], parent_span_id=request.headers['X-B3-ParentSpanID'], flags='1', is_sampled=
+    request.headers['X-B3-Sampled']), span_name='locationquery:autocomplete', transport_handler=http_transport, port=PORT, 
+    sample_rate=ZIPKINSAMPLERATE):   
+    if request.args.get('pagelength') is None: pagelength = 20
+    else: pagelength = int(request.args.get('pagelength'))
 
-  locationarray = getlocationfragments(prefix, pagelength)
+    locationarray = getlocationfragments(prefix, pagelength)
 
-  locationcollection = {}
-  locationcollection['locations'] = locationarray
+    locationcollection = {}
+    locationcollection['locations'] = locationarray
 
-  return json.dumps(locationcollection)  
+    return json.dumps(locationcollection)  
 
+@zipkin_span(service_name='hotels.com:locationquery', span_name='locationquery:querylocationkeys')
 def querylocationkeys(query):
+  rdb = redis.StrictRedis(connection_pool=redispool)
+
   locations = []
   keys = rdb.keys(query)
 
@@ -108,6 +132,7 @@ def querylocationkeys(query):
 
   return locations
 
+@zipkin_span(service_name='hotels.com:locationquery', span_name='locationquery:makepubliclocation')
 def makepubliclocation(location):
   newlocation = {}
   
@@ -122,102 +147,115 @@ def makepubliclocation(location):
 @location.route('/api/v1.0/locations', methods=['GET'])
 @cross_origin()
 def getlocations():
-  locations = []
-  locations = querylocationkeys('L-*')
+  with zipkin_span(service_name='hotels.com:locationquery', span_name='locationquery:getlocations', transport_handler=http_transport,
+    port=PORT, sample_rate=ZIPKINSAMPLERATE):  
+    locations = []
+    locations = querylocationkeys('L-*')
   
-  return jsonify({ 'locations': map(makepubliclocation, locations) })
+    return jsonify({ 'locations': map(makepubliclocation, locations) })
 
 @location.route('/api/v1.0/locations/<int:locationkey>', methods=['GET'])
 @cross_origin()
 def getlocation(locationkey):
-  locations = []
-  locations = querylocationkeys('L-' + str(locationkey))
+  with zipkin_span(service_name='hotels.com:locationquery', span_name='locationquery:getlocation', transport_handler=http_transport,
+    port=PORT, sample_rate=ZIPKINSAMPLERATE):  
+    locations = []
+    locations = querylocationkeys('L-' + str(locationkey))
   
-  return jsonify({ 'locations': map(makepubliclocation, locations) }) 
+    return jsonify({ 'locations': map(makepubliclocation, locations) }) 
 
 @location.route('/api/v1.0/locations', methods=['POST'])
 @cross_origin()
 def createlocation():
-  if not request.json or not 'displayname' in request.json or not 'id' in request.json:
-    abort(400)
+  with zipkin_span(service_name='hotels.com:locationquery', span_name='locationquery:createlocation', transport_handler=http_transport,
+    port=PORT, sample_rate=ZIPKINSAMPLERATE):  
+    rdb = redis.StrictRedis(connection_pool=redispool)
+    if not request.json or not 'displayname' in request.json or not 'id' in request.json:
+      abort(400)
  
-  location = {
-    'id': request.json['id'],
-    'displayname': request.json['displayname'],
-    'acname': request.json['acname'],    
-    'icon': request.json.get('icon', ''),
-    'latitude': request.json.get('latitude', 0),
-    'longitude': request.json.get('longitude', 0)
-  }
+    location = {
+      'id': request.json['id'],
+      'displayname': request.json['displayname'],
+      'acname': request.json['acname'],    
+      'icon': request.json.get('icon', ''),
+      'latitude': request.json.get('latitude', 0),
+      'longitude': request.json.get('longitude', 0)
+    }
   
-  locationname = location['acname']
-  for l in range(1, len(locationname)):
-    locationfragment = locationname[0:l]
-    rdb.zadd('locationfragments', 0, locationfragment)
+    locationname = location['acname']
+    for l in range(1, len(locationname)):
+      locationfragment = locationname[0:l]
+      rdb.zadd('locationfragments', 0, locationfragment)
   
-  locationwithid = locationname + '%L-' + str(location['id']) + '%'
-  rdb.zadd('locationfragments', 0, locationwithid)
+    locationwithid = locationname + '%L-' + str(location['id']) + '%'
+    rdb.zadd('locationfragments', 0, locationwithid)
 
-  locationkey = 'L-' + str(location['id'])
-  rdb.delete(locationkey)
+    locationkey = 'L-' + str(location['id'])
+    rdb.delete(locationkey)
 
-  rdb.rpush(locationkey, location['id'])
-  rdb.rpush(locationkey, location['displayname'])
-  rdb.rpush(locationkey, location['acname'])
-  rdb.rpush(locationkey, location['icon'])
-  rdb.rpush(locationkey, location['latitude'])
-  rdb.rpush(locationkey, location['longitude'])
+    rdb.rpush(locationkey, location['id'])
+    rdb.rpush(locationkey, location['displayname'])
+    rdb.rpush(locationkey, location['acname'])
+    rdb.rpush(locationkey, location['icon'])
+    rdb.rpush(locationkey, location['latitude'])
+    rdb.rpush(locationkey, location['longitude'])
 
-  return jsonify({ 'location': location }), 201   
+    return jsonify({ 'location': location }), 201   
 
 @location.route('/api/v1.0/locations/<int:locationkey>', methods = ['PUT'])
 @cross_origin()
 def updatelocation(locationkey):
-  if not request.json: abort(400)
-  locationkey = 'L-' + str(locationkey)
+  with zipkin_span(service_name='hotels.com:locationquery', span_name='locationquery:updatelocation', transport_handler=http_transport,
+    port=PORT, sample_rate=ZIPKINSAMPLERATE):  
+    rdb = redis.StrictRedis(connection_pool=redispool)
+    if not request.json: abort(400)
+    
+    locationkey = 'L-' + str(locationkey)
+    location = {
+      'id': request.json['id'],
+      'displayname': request.json['displayname'],
+      'acname': request.json['acname'],
+      'icon': request.json.get('icon', ''),
+      'latitude': request.json.get('latitude', 0),
+      'longitude': request.json.get('longitude', 0)
+    }
 
-  location = {
-    'id': request.json['id'],
-    'displayname': request.json['displayname'],
-    'acname': request.json['acname'],
-    'icon': request.json.get('icon', ''),
-    'latitude': request.json.get('latitude', 0),
-    'longitude': request.json.get('longitude', 0)
-  }
-
-  rdb.lset(locationkey, 0, location['id'])
-  rdb.lset(locationkey, 1, location['displayname'])
-  rdb.lset(locationkey, 2, location['acname'])  
-  rdb.lset(locationkey, 3, location['icon'])
-  rdb.lset(locationkey, 4, location['latitude'])
-  rdb.lset(locationkey, 5, location['longitude'])
+    rdb.lset(locationkey, 0, location['id'])
+    rdb.lset(locationkey, 1, location['displayname'])
+    rdb.lset(locationkey, 2, location['acname'])  
+    rdb.lset(locationkey, 3, location['icon'])
+    rdb.lset(locationkey, 4, location['latitude'])
+    rdb.lset(locationkey, 5, location['longitude'])
   
-  return jsonify({ 'locations': makepubliclocation(location) })
+    return jsonify({ 'locations': makepubliclocation(location) })
 
 @location.route('/api/v1.0/locations/<int:locationkey>', methods = ['DELETE'])
 @cross_origin()
 def deletelocation(locationkey):
-  locations = querylocationkeys('L-' + str(locationkey))
+  with zipkin_span(service_name='hotels.com:locationquery', span_name='locationquery:updatelocation', transport_handler=http_transport,
+    port=PORT, sample_rate=ZIPKINSAMPLERATE):   
+    rdb = redis.StrictRedis(connection_pool=redispool)
+    locations = querylocationkeys('L-' + str(locationkey))
 
-  if (len(locations)) <= 0: 
-    return jsonify({ 'result': False })
-  else:
-    locationfullname = locations[0]['acname'] + '%L-' + str(locationkey) + '%'
-    start = rdb.zrank('locationfragments', locationfullname)
+    if (len(locations)) <= 0: 
+      return jsonify({ 'result': False })
+    else:
+      locationfullname = locations[0]['acname'] + '%L-' + str(locationkey) + '%'
+      start = rdb.zrank('locationfragments', locationfullname)
     
-    previous = start - 1
-    locationfragment = locationfullname
+      previous = start - 1
+      locationfragment = locationfullname
 
-    commonfragment = rdb.zrange('locationfragments', start + 1, start + 1)
-    while (len(locationfragment) > 0):
-      locationfragment = rdb.zrange('locationfragments', previous, previous)
+      commonfragment = rdb.zrange('locationfragments', start + 1, start + 1)
+      while (len(locationfragment) > 0):
+        locationfragment = rdb.zrange('locationfragments', previous, previous)
       
-      if (locationfragment[0][-1] == '%' or (len(commonfragment) > 0 and locationfragment[0] == commonfragment[0][0:-1])): 
-        break
-      else:
-        previous = previous - 1
+        if (locationfragment[0][-1] == '%' or (len(commonfragment) > 0 and locationfragment[0] == commonfragment[0][0:-1])): 
+          break
+        else:
+          previous = previous - 1
      
-    rdb.zremrangebyrank('locationfragments', previous + 1, start)  
-    rdb.delete('L-' + str(locationkey))
+      rdb.zremrangebyrank('locationfragments', previous + 1, start)  
+      rdb.delete('L-' + str(locationkey))
     
-    return jsonify( { 'result': True } )
+      return jsonify( { 'result': True } )
