@@ -26,11 +26,10 @@ if 'VCAP_SERVICES' in os.environ:
 
   redispool = redis.ConnectionPool.from_url(uri + '/0')
 else:
-  redispool = redis.ConnectionPool(host=os.getenv('REDIS_HOST', 'localhost'), port=os.getenv('REDIS_PORT', 6379), db=0)
+  redispool = redis.ConnectionPool.from_url(os.getenv('REDISURI', 'redis://localhost:6379/0'))
 
 PORT = int(os.getenv('PORT', '9011'))
-ZIPKINHOST = os.getenv('ZIPKINHOST', 'zipkin')
-ZIPKINPORT = int(os.getenv('ZIPKINPORT', 9411))
+ZIPKINURI = os.getenv('ZIPKINURI', 'http://zipkin:9411')
 ZIPKINSAMPLERATE = float(os.getenv('ZIPKINSAMPLERATE', 100.0))
 
 @location.errorhandler(400)
@@ -43,7 +42,7 @@ def not_found(error):
 
 def http_transport(encoded_span):
   # The collector expects a thrift-encoded list of spans.
-  requests.post('http://' + ZIPKINHOST + ':' + str(ZIPKINPORT) + '/api/v1/spans', data=encoded_span, headers={'Content-Type': 'application/x-thrift'})  
+  requests.post(ZIPKINURI + '/api/v1/spans', data=encoded_span, headers={'Content-Type': 'application/x-thrift'})  
 
 @zipkin_span(service_name='hotels.com:locationquery', span_name='locationquery:getlocationfragments')
 def getlocationfragments(prefix, pagelength):
@@ -172,7 +171,7 @@ def createlocation():
     rdb = redis.StrictRedis(connection_pool=redispool)
     if not request.json or not 'displayname' in request.json or not 'id' in request.json:
       abort(400)
- 
+
     location = {
       'id': request.json['id'],
       'displayname': request.json['displayname'],
@@ -181,7 +180,7 @@ def createlocation():
       'latitude': request.json.get('latitude', 0),
       'longitude': request.json.get('longitude', 0)
     }
-  
+
     locationname = location['acname']
     for l in range(1, len(locationname)):
       locationfragment = locationname[0:l]
